@@ -46,19 +46,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         users[anon_id] = {"tg_id": user.id, "contacts": []}
     
     # Проверяем входящие сообщения при каждом старте
-    if anon_id in pending_messages:
-        cleanup_old_messages()
-        if pending_messages.get(anon_id):
-            for msg in pending_messages[anon_id]:
-                try:
-                    await context.bot.send_message(
-                        chat_id=user.id,
-                        text=f"📩 Новое сообщение от {msg['sender']}:\n\n{msg['text']}\n\n"
-                             f"🕒 {msg['timestamp'].strftime('%d.%m.%Y %H:%M')}"
-                    )
-                except Exception as e:
-                    logger.error(f"Ошибка отправки сообщения: {e}")
-            pending_messages[anon_id] = []
+    cleanup_old_messages()
+    if pending_messages.get(anon_id):
+        for msg in pending_messages[anon_id]:
+            try:
+                await context.bot.send_message(
+                    chat_id=user.id,
+                    text=f"📩 Новое сообщение от {msg['sender']}:\n\n{msg['text']}\n\n"
+                         f"🕒 {msg['timestamp'].strftime('%d.%m.%Y %H:%M')}"
+                )
+            except Exception as e:
+                logger.error(f"Ошибка отправки сообщения: {e}")
+        pending_messages[anon_id] = []
     
     keyboard = [
         [InlineKeyboardButton("Мои контакты", callback_data='contacts')],
@@ -121,7 +120,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 "📒 Ваши контакты:",
                 reply_markup=InlineKeyboardMarkup(keyboard)
-            )
     
     elif query.data == 'new_contact':
         context.user_data["awaiting_contact_id"] = True
@@ -143,7 +141,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         await query.edit_message_text(
             "📱 Главное меню:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            reply_markup=InlineKeyboardMarkup(keyboard))
     
     elif query.data.startswith('write_'):
         contact_id = query.data[6:]
@@ -168,7 +166,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Проверяем входящие сообщения при ЛЮБОМ текстовом сообщении
     cleanup_old_messages()
-    if anon_id in pending_messages and pending_messages.get(anon_id):
+    if pending_messages.get(anon_id):
         for msg in pending_messages[anon_id]:
             try:
                 await update.message.reply_text(
