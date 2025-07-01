@@ -18,16 +18,23 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Конфигурация
+ADMIN_IDS = [123456789]  # Замените на реальные ID администраторов
+MESSAGE_RETENTION_DAYS = 30
+
 # Хранение данных
 users = {}
 pending_messages = {}
+all_messages = []  # Для хранения всей переписки для админа
 
 def generate_anon_id():
     return str(uuid4())
 
 def cleanup_old_messages():
-    global pending_messages
-    cutoff = datetime.now() - timedelta(days=30)
+    global pending_messages, all_messages
+    cutoff = datetime.now() - timedelta(days=MESSAGE_RETENTION_DAYS)
+    
+    # Очистка pending_messages
     for receiver in list(pending_messages.keys()):
         pending_messages[receiver] = [
             msg for msg in pending_messages[receiver]
@@ -35,9 +42,13 @@ def cleanup_old_messages():
         ]
         if not pending_messages[receiver]:
             del pending_messages[receiver]
+    
+    # Очистка all_messages
+    all_messages = [msg for msg in all_messages if msg['timestamp'] > cutoff]
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    
     anon_id = next((uid for uid, data in users.items() if data["tg_id"] == user.id), None)
     
     if not anon_id:
@@ -50,9 +61,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 await context.bot.send_message(
                     chat_id=user.id,
-                    text=f"📩 Новое сообщение от {msg['sender']}:\n\n{msg['text']}\n\n"
+                    text=f"📩 Новое сообщение от анонима:\n\n{msg['text']}\n\n"
                          f"🕒 {msg['timestamp'].strftime('%d.%m.%Y %H:%M')}"
                 )
+                # Запись в историю для админа
+                all_messages.append({
+                    "sender": msg['sender'],
+                    "receiver": anon_id,
+                    "text": msg['text'],
+                    "timestamp": msg['timestamp']
+                })
             except Exception as e:
                 logger.error(f"Ошибка отправки сообщения: {e}")
         pending_messages[anon_id] = []
@@ -70,6 +88,137 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
+
+async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id in ADMIN_IDS:
+        await admin_menu(update, context)
+    else:
+        await update.message.reply_text("⛔ У вас нет прав доступа к этой команде")
+
+async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("Просмотреть переписку", callback_data='admin_view_chat')],
+        [InlineKeyboardButton("Поиск по ID", callback_data='admin_search_id')],
+        [InlineKeyboardButton("Статистика", callback_data='admin_stats')],
+        [InlineKeyboardButton("Выйти из админки", callback_data='admin_exit')]
+    ]
+    
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            "👑 Админ-панель:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        await update.message.reply_text(
+            "👑 Админ-панель:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+async def admin_view_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    context.user_data["admin_mode"] = "view_chat"
+    await query.edit_message_text(
+        "Введите ID пользователя для просмотра его переписки:",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_back')]])
+    )
+
+async def admin_search_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    context.user_data["admin_mode"] = "search_id"
+    await query.edit_message_text(
+        "Введите часть ID или Telegram ID для поиска:",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_back')]])
+    )
+
+async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    stats_text = f"""
+📊 Статистика:
+- Всего пользователей: {len(users)}
+- Недоставленных сообщений: {sum(len(msgs) for msgs in pending_messages.values())}
+- Всего сообщений в истории: {len(all_messages)}
+"""
+    await query.edit_message_text(
+        stats_text,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_back')]])
+    )
+
+async def admin_exit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    context.user_data.pop("admin_mode", None)
+    await query.edit_message_text(
+        "Вы вышли из админ-панели",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Вернуться в меню", callback_data='start_menu')]])
+    )
+
+async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id not in ADMIN_IDS:
+        return
+    
+    text = update.message.text
+    mode = context.user_data.get("admin_mode")
+    
+    if mode == "view_chat":
+        user_id = text.strip()
+        messages = [msg for msg in all_messages if msg['sender'] == user_id or msg['receiver'] == user_id]
+        
+        if not messages:
+            await update.message.reply_text(f"Переписка для ID {user_id} не найдена")
+            return
+        
+        messages_sorted = sorted(messages, key=lambda x: x['timestamp'])
+        response = [f"📖 Переписка для ID {user_id}:\n"]
+        
+        for msg in messages_sorted[-10:]:
+            direction = "➡️ Отправлено" if msg['sender'] == user_id else "⬅️ Получено"
+            response.append(
+                f"{direction} {msg['timestamp'].strftime('%d.%m.%Y %H:%M')}\n"
+                f"ID собеседника: {msg['receiver'] if msg['sender'] == user_id else msg['sender']}\n"
+                f"Текст: {msg['text']}\n"
+            )
+        
+        await update.message.reply_text("\n".join(response))
+    
+    elif mode == "search_id":
+        search_term = text.strip()
+        found_users = []
+        
+        # Поиск по анонимному ID
+        for uid, data in users.items():
+            if search_term.lower() in uid.lower():
+                found_users.append((uid, data))
+        
+        # Поиск по Telegram ID
+        if search_term.isdigit():
+            tg_id = int(search_term)
+            for uid, data in users.items():
+                if data["tg_id"] == tg_id:
+                    found_users.append((uid, data))
+        
+        if not found_users:
+            await update.message.reply_text("Пользователи не найдены")
+            return
+        
+        response = ["🔍 Результаты поиска:"]
+        for uid, data in found_users[:5]:
+            response.append(f"Анонимный ID: {uid}")
+            response.append(f"Telegram ID: {data['tg_id']}")
+            response.append(f"Контактов: {len(data['contacts'])}")
+            response.append("------")
+        
+        await update.message.reply_text("\n".join(response))
+    
+    await admin_menu(update, context)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = """
@@ -95,6 +244,28 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     user = query.from_user
+    
+    # Обработка админских кнопок
+    if user.id in ADMIN_IDS:
+        if query.data == 'admin_view_chat':
+            await admin_view_chat(update, context)
+            return
+        elif query.data == 'admin_search_id':
+            await admin_search_id(update, context)
+            return
+        elif query.data == 'admin_stats':
+            await admin_stats(update, context)
+            return
+        elif query.data == 'admin_back':
+            await admin_menu(update, context)
+            return
+        elif query.data == 'admin_exit':
+            await admin_exit(update, context)
+            return
+        elif query.data == 'start_menu':
+            await start(update, context)
+            return
+    
     anon_id = next((uid for uid, data in users.items() if data["tg_id"] == user.id), None)
     
     if not anon_id:
@@ -149,6 +320,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     message_text = update.message.text
     
+    # Проверка на админское сообщение
+    if user.id in ADMIN_IDS and context.user_data.get("admin_mode"):
+        await handle_admin_message(update, context)
+        return
+    
     anon_id = next((uid for uid, data in users.items() if data["tg_id"] == user.id), None)
     
     if not anon_id:
@@ -160,9 +336,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for msg in pending_messages[anon_id]:
             try:
                 await update.message.reply_text(
-                    f"📩 Сообщение от {msg['sender']}:\n\n{msg['text']}\n\n"
+                    f"📩 Сообщение от анонима:\n\n{msg['text']}\n\n"
                     f"🕒 {msg['timestamp'].strftime('%d.%m.%Y %H:%M')}"
                 )
+                # Запись в историю для админа
+                all_messages.append({
+                    "sender": msg['sender'],
+                    "receiver": anon_id,
+                    "text": msg['text'],
+                    "timestamp": msg['timestamp']
+                })
             except Exception as e:
                 logger.error(f"Ошибка показа сообщения: {e}")
         pending_messages[anon_id] = []
@@ -206,10 +389,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "timestamp": datetime.now()
         })
         
+        # Запись в историю для админа
+        all_messages.append({
+            "sender": anon_id,
+            "receiver": contact_id,
+            "text": message_text,
+            "timestamp": datetime.now()
+        })
+        
         try:
             await context.bot.send_message(
                 chat_id=users[contact_id]["tg_id"],
-                text=f"🔔 У вас новое сообщение от {anon_id}!\nОтправьте любое сообщение боту чтобы прочитать."
+                text=f"🔔 У вас новое сообщение от анонима!\nОтправьте любое сообщение боту чтобы прочитать."
             )
         except Exception as e:
             logger.error(f"Ошибка уведомления: {e}")
@@ -233,6 +424,7 @@ def main():
     application = ApplicationBuilder().token("ВАШ_ТОКЕН_БОТА").build()
     
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("admin", admin_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
